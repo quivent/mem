@@ -71,7 +71,7 @@ struct ProcessRow {
     let name: String
     let mine: Bool      // owned by the current user, so it can be quit without admin rights
     let footprint: UInt64
-    let viaTop: Bool    // root-owned: footprint came from memread or top, not a direct read
+    let privileged: Bool    // root-owned: footprint came from memread (or top), not a direct read
 }
 
 final class ProcessReader {
@@ -115,11 +115,11 @@ final class ProcessReader {
             } == 0
             let id = identity(pid, start: ok ? info.ri_proc_start_abstime : 0)
             if ok {
-                rows.append(ProcessRow(pid: pid, name: id.name, mine: id.mine, footprint: info.ri_phys_footprint, viaTop: false))
+                rows.append(ProcessRow(pid: pid, name: id.name, mine: id.mine, footprint: info.ri_phys_footprint, privileged: false))
             } else if helperInstalled {
                 missing.append((pid, id))
             } else if let f = topFootprints[pid] {
-                rows.append(ProcessRow(pid: pid, name: id.name, mine: id.mine, footprint: f, viaTop: true))
+                rows.append(ProcessRow(pid: pid, name: id.name, mine: id.mine, footprint: f, privileged: true))
             } else {
                 needTop = true
             }
@@ -129,7 +129,7 @@ final class ProcessReader {
             if !missing.isEmpty {
                 let footprints = runHelper()
                 for (pid, id) in missing {
-                    if let f = footprints[pid] { rows.append(ProcessRow(pid: pid, name: id.name, mine: id.mine, footprint: f, viaTop: true)) }
+                    if let f = footprints[pid] { rows.append(ProcessRow(pid: pid, name: id.name, mine: id.mine, footprint: f, privileged: true)) }
                 }
             }
         } else if snapshot {
@@ -447,7 +447,7 @@ final class Controller: NSObject, NSSearchFieldDelegate, NSTableViewDataSource, 
         case "memory": cell.stringValue = fmt(p.footprint)
         default: cell.stringValue = String(p.pid)
         }
-        cell.textColor = p.viaTop && id.rawValue == "memory" ? .secondaryLabelColor : .labelColor
+        cell.textColor = p.privileged && id.rawValue == "memory" ? .secondaryLabelColor : .labelColor
         return cell
     }
 
@@ -538,8 +538,8 @@ if CommandLine.arguments.contains("--dump") {
     Thread.sleep(forTimeInterval: 0.6)   // let the top snapshot land
     RunLoop.main.run(until: Date().addingTimeInterval(0.1))
     let rows = reader.read().sorted { $0.footprint > $1.footprint }
-    print("\(rows.count) processes (\(rows.filter { $0.viaTop }.count) via top)")
-    for p in rows.prefix(12) { print(String(format: "%6d  %-28@ %10@%@", p.pid, p.name as NSString, fmt(p.footprint) as NSString, p.viaTop ? " (top)" : "")) }
+    print("\(rows.count) processes (\(rows.filter { $0.privileged }.count) root-owned, via \(reader.helperInstalled ? "memread" : "top"))")
+    for p in rows.prefix(12) { print(String(format: "%6d  %-28@ %10@%@", p.pid, p.name as NSString, fmt(p.footprint) as NSString, p.privileged ? " (top)" : "")) }
     print("self \(fmt(ownFootprint()))")
     exit(0)
 }
