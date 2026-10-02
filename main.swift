@@ -124,7 +124,8 @@ final class ProcessReader {
                 needTop = true
             }
         }
-        identities = identities.filter { live.contains($0.key) }
+        // Prune in place: rebuilding the dictionary every refresh left freed pages behind.
+        for k in identities.keys where !live.contains(k) { identities.removeValue(forKey: k) }
         if helperInstalled {
             if !missing.isEmpty {
                 let footprints = runHelper()
@@ -173,9 +174,18 @@ final class ProcessReader {
         guard (try? task.run()) != nil else { return parsed }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         task.waitUntilExit()
-        for line in String(decoding: data, as: UTF8.self).split(separator: "\n") {
-            let f = line.split(separator: " ")
-            if f.count == 2, let pid = Int32(f[0]), let bytes = UInt64(f[1]) { parsed[pid] = bytes }
+        // Parse "pid bytes\n" straight from the bytes: no String or substrings per line.
+        parsed.reserveCapacity(600)
+        data.withUnsafeBytes { (buf: UnsafeRawBufferPointer) in
+            var pid: Int32 = 0, val: UInt64 = 0, second = false
+            for b in buf {
+                switch b {
+                case 48...57: if second { val = val &* 10 &+ UInt64(b - 48) } else { pid = pid &* 10 &+ Int32(b - 48) }
+                case 32: second = true
+                case 10: parsed[pid] = val; pid = 0; val = 0; second = false
+                default: break
+                }
+            }
         }
         return parsed
     }
@@ -239,10 +249,15 @@ func fmt(_ bytes: UInt64) -> String {
 
 // MARK: - Drawing helpers
 
-let wiredColor = NSColor.systemOrange
-let appColor = NSColor.systemBlue
-let compressedColor = NSColor.systemPurple
-let cachedColor = NSColor.systemGray
+// Fixed sRGB colors: NSColor.systemOrange and friends load the dynamic system color
+// machinery (~0.6 MB). These match the system colors closely in both appearances.
+let wiredColor = NSColor(srgbRed: 1.0, green: 0.62, blue: 0.04, alpha: 1)
+let appColor = NSColor(srgbRed: 0.04, green: 0.52, blue: 1.0, alpha: 1)
+let compressedColor = NSColor(srgbRed: 0.75, green: 0.35, blue: 0.95, alpha: 1)
+let cachedColor = NSColor(srgbRed: 0.56, green: 0.56, blue: 0.58, alpha: 1)
+let greenColor = NSColor(srgbRed: 0.20, green: 0.78, blue: 0.35, alpha: 1)
+let yellowColor = NSColor(srgbRed: 1.0, green: 0.80, blue: 0.0, alpha: 1)
+let redColor = NSColor(srgbRed: 1.0, green: 0.27, blue: 0.23, alpha: 1)
 
 private let font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
 private let digits = NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
@@ -267,7 +282,7 @@ final class SummaryView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         let m = memory
-        let (word, pColor): (String, NSColor) = m.pressure >= 4 ? ("Critical", .systemRed) : m.pressure >= 2 ? ("Warning", .systemYellow) : ("Normal", .systemGreen)
+        let (word, pColor): (String, NSColor) = m.pressure >= 4 ? ("Critical", redColor) : m.pressure >= 2 ? ("Warning", yellowColor) : ("Normal", greenColor)
         let cells: [[(String, NSColor?, String, NSColor)]] = [
             [("Used", nil, "\(fmt(m.used)) of \(fmt(m.physical))", .labelColor), ("Pressure", nil, "\(word) · \(m.freePercent)% free", pColor)],
             [("App", appColor, fmt(m.app), .labelColor), ("Wired", wiredColor, fmt(m.wired), .labelColor)],
@@ -309,12 +324,13 @@ final class SummaryView: NSView {
 
 // MARK: - Window
 
-final class Controller: NSObject, NSSearchFieldDelegate, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
+final class Controller: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
     let window: NSWindow
     private let summary = SummaryView()
     private let table = NSTableView()
     private var shown: [ProcessRow] = []
-    private let search = NSSearchField()
+    // Plain text field, not NSSearchField: its icon button cells cost ~0.5 MB.
+    private let search = NSTextField()
     private let reader = ProcessReader()
     private var all: [ProcessRow] = []
     private var pressureSource: DispatchSourceMemoryPressure?
@@ -359,7 +375,8 @@ final class Controller: NSObject, NSSearchFieldDelegate, NSTableViewDataSource, 
         summary.autoresizingMask = [.width, .minYMargin]
         search.frame = NSRect(x: 16, y: h - 14 - 110 - 8 - 24, width: w - 32, height: 24)
         search.autoresizingMask = [.width, .minYMargin]
-        search.placeholderString = "Filter processes"
+        search.placeholderString = "Filter processes (Esc clears)"
+        search.bezelStyle = .roundedBezel
         search.delegate = self
         for (id, title, width, ascending) in [("name", "Process", 270.0, true), ("memory", "Memory", 90.0, false),
                                               ("pid", "PID", 60.0, true)] {
@@ -460,6 +477,14 @@ final class Controller: NSObject, NSSearchFieldDelegate, NSTableViewDataSource, 
 
     func controlTextDidChange(_ obj: Notification) { apply() }
 
+    // Esc clears the filter, as it did with the search field.
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        guard selector == #selector(NSResponder.cancelOperation(_:)) else { return false }
+        search.stringValue = ""
+        apply()
+        return true
+    }
+
     // Context menu: quit / force quit
 
     private func menu(for p: ProcessRow) -> NSMenu {
@@ -509,13 +534,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appMenu.addItem(withTitle: "Refresh", action: #selector(Controller.refresh), keyEquivalent: "r")
         appMenu.addItem(withTitle: "Quit Mem", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
-        let editItem = main.addItem(withTitle: "", action: nil, keyEquivalent: "")
-        let edit = NSMenu(title: "Edit")
-        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
-        editItem.submenu = edit
         NSApp.mainMenu = main
 
         controller = Controller()

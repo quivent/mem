@@ -5,6 +5,9 @@
 // process. Root-owned processes come from the setuid memread helper when installed,
 // else from one /usr/bin/top snapshot.
 //
+// Each row says what a process is and where it lives: age, controlling terminal, and
+// (for the selection) the hosting app, start time and path. Enter jumps there.
+//
 //   mem            interactive
 //   mem -1 [-n N]  print one snapshot (also when stdout isn't a terminal); -a for all
 
@@ -43,6 +46,9 @@ typedef struct {
     uint64_t fp;
     char name[48];
     char mine, priv;
+    time_t start;
+    pid_t ppid;
+    char tty[12];       // "s006" for /dev/ttys006, "" when none
 } proc_t;
 
 typedef struct { pid_t pid; uint64_t fp; } pf_t;
@@ -61,7 +67,7 @@ static int color = 1;
 
 // Interactive state.
 static int rows = 24, cols = 80;
-static int sort_key;            // 0 memory, 1 name, 2 pid
+static int sort_key;            // 0 memory, 1 name, 2 pid, 3 age (oldest first)
 static pid_t sel_pid = -1;
 static int top_row;
 static char filter[48];
@@ -171,6 +177,14 @@ static int read_privileged(void) {
     return 0;
 }
 
+// kinfo_proc is readable for every process, root-owned included: start time,
+// parent, owner and controlling terminal without privileges.
+static int kinfo(pid_t pid, struct kinfo_proc *kp) {
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, pid };
+    size_t sz = sizeof *kp;
+    return sysctl(mib, 4, kp, &sz, NULL, 0) == 0 && sz > 0;
+}
+
 static void read_procs(void) {
     static pid_t pids[MAXPROC];
     int n = proc_listallpids(pids, sizeof pids);
@@ -186,8 +200,17 @@ static void read_procs(void) {
         struct rusage_info_v4 ri;
         if (proc_pid_rusage(pid, RUSAGE_INFO_V4, (rusage_info_t *)&ri) == 0) { p->fp = ri.ri_phys_footprint; p->priv = 0; }
         else { p->fp = 0; p->priv = 1; missing++; }
-        struct proc_bsdshortinfo bi;
-        p->mine = proc_pidinfo(pid, PROC_PIDT_SHORTBSDINFO, 0, &bi, sizeof bi) > 0 && bi.pbsi_uid == me;
+        struct kinfo_proc kp;
+        if (kinfo(pid, &kp)) {
+            p->mine = kp.kp_eproc.e_ucred.cr_uid == me;
+            p->start = kp.kp_proc.p_starttime.tv_sec;
+            p->ppid = kp.kp_eproc.e_ppid;
+            dev_t t = kp.kp_eproc.e_tdev;
+            const char *dn = t != (dev_t)-1 ? devname(t, S_IFCHR) : NULL;
+            snprintf(p->tty, sizeof p->tty, "%s", dn ? (strncmp(dn, "tty", 3) == 0 ? dn + 3 : dn) : "");
+        } else {
+            p->mine = 0; p->start = 0; p->ppid = 0; p->tty[0] = 0;
+        }
         proc_label(pid, p->name, sizeof p->name);
         nprocs++;
     }
@@ -223,6 +246,10 @@ static int cmp_view(const void *a, const void *b) {
     switch (sort_key) {
     case 1: return strcasecmp(x->name, y->name);
     case 2: return (x->pid > y->pid) - (x->pid < y->pid);
+    case 3: {   // oldest first; unknown start times last
+        time_t a = x->start ? x->start : (time_t)1 << 62, b = y->start ? y->start : (time_t)1 << 62;
+        return (a > b) - (a < b);
+    }
     default: return (y->fp > x->fp) - (y->fp < x->fp);
     }
 }
@@ -265,6 +292,56 @@ static const char *fmt_bytes(uint64_t b, char *buf) {
     if (gb >= 1) snprintf(buf, 16, "%.2f GB", gb);
     else snprintf(buf, 16, "%.0f MB", b / 1048576.0);
     return buf;
+}
+
+static const char *fmt_age(time_t start, char *buf) {
+    long d = (long)(time(NULL) - start);
+    if (start <= 0) snprintf(buf, 8, "?");
+    else if (d < 60) snprintf(buf, 8, "%lds", d);
+    else if (d < 3600) snprintf(buf, 8, "%ldm", d / 60);
+    else if (d < 86400) snprintf(buf, 8, "%ldh", d / 3600);
+    else snprintf(buf, 8, "%ldd", d / 86400);
+    return buf;
+}
+
+// The app hosting a process: the process itself or its nearest ancestor running from
+// an .app bundle (the terminal for a shell job, the browser for a helper). Returns the
+// outermost bundle path, e.g. /Applications/iTerm.app.
+static int host_app(pid_t pid, char *bundle, size_t n) {
+    for (int depth = 0; pid > 1 && depth < 32; depth++) {
+        char path[PROC_PIDPATHINFO_MAXSIZE];
+        if (proc_pidpath(pid, path, sizeof path) > 0) {
+            char *app = strstr(path, ".app/");
+            if (app) { app[4] = 0; snprintf(bundle, n, "%s", path); return 1; }
+        }
+        struct kinfo_proc kp;
+        if (!kinfo(pid, &kp)) break;
+        pid = kp.kp_eproc.e_ppid;
+    }
+    return 0;
+}
+
+static const char *app_name(const char *bundle, char *buf, size_t n) {
+    const char *base = strrchr(bundle, '/');
+    snprintf(buf, n, "%s", base ? base + 1 : bundle);
+    size_t len = strlen(buf);
+    if (len > 4 && strcmp(buf + len - 4, ".app") == 0) buf[len - 4] = 0;
+    return buf;
+}
+
+// Run a helper quietly and return its exit status.
+static int run_quiet(char *const argv[]) {
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_addopen(&fa, 1, "/dev/null", O_WRONLY, 0);
+    posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
+    pid_t c;
+    int rc = posix_spawn(&c, argv[0], &fa, NULL, argv, environ);
+    posix_spawn_file_actions_destroy(&fa);
+    if (rc != 0) return -1;
+    int st;
+    waitpid(c, &st, 0);
+    return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
 }
 
 // Write at most `width` columns of a UTF-8 string, padding to `width` when pad is set.
@@ -336,17 +413,17 @@ static void render(void) {
     }
     put("\x1b[K\r\n");
     // Line 4: column header
-    const char *mark[3] = { "", "", "" };
+    const char *mark[4] = { " ", "", " ", " " };
     mark[sort_key] = sort_key == 0 ? "▼" : "▲";
     sgr("7");
-    char hdr[64];
-    snprintf(hdr, sizeof hdr, " %7s%s %10s%s  PROCESS%s", "PID", mark[2][0] ? mark[2] : " ", "MEMORY", mark[0][0] ? mark[0] : " ", mark[1]);
+    char hdr[96];
+    snprintf(hdr, sizeof hdr, " %7s%s %10s%s %5s%s %-6s  PROCESS%s", "PID", mark[2], "MEMORY", mark[0], "AGE", mark[3], "TTY", mark[1]);
     put_cols(hdr, cols, 1);
     sgr("0");
     put("\r\n");
 
     // Rows
-    int list_h = rows - 5;
+    int list_h = rows - 6;
     if (list_h < 1) list_h = 1;
     int si = sel_index();
     if (si < 0 && nview) { si = 0; sel_pid = procs[view[0]].pid; }
@@ -360,18 +437,35 @@ static void render(void) {
         int i = top_row + r;
         if (i < nview) {
             proc_t *p = &procs[view[i]];
-            char m[16], line[96];
-            snprintf(line, sizeof line, " %7d  %10s   ", p->pid, fmt_bytes(p->fp, m));
+            char m[16], a[8], line[96];
+            snprintf(line, sizeof line, " %7d  %10s  %5s  %-6s  ", p->pid, fmt_bytes(p->fp, m), fmt_age(p->start, a), p->tty[0] ? p->tty : "-");
             if (i == si) sgr("7");
             put_cols(line, cols, 0);
-            int rest = cols - 22;
+            int rest = cols - 37;
             if (rest > 0) put_cols(p->name, rest, i == si);
             if (i == si) sgr("0");
         }
         put("\x1b[K\r\n");
     }
 
-    // Footer: prompt, status, or key help
+    // Footer line 1: where the selected process lives.
+    if (si >= 0) {
+        proc_t *p = &procs[view[si]];
+        char bundle[PROC_PIDPATHINFO_MAXSIZE], app[64], when[32] = "?", path[PROC_PIDPATHINFO_MAXSIZE] = "", where[160], line[1400];
+        if (p->start > 0) { struct tm tm; localtime_r(&p->start, &tm); strftime(when, sizeof when, "%a %b %e %H:%M", &tm); }
+        proc_pidpath(p->pid, path, sizeof path);
+        int hosted = host_app(p->pid, bundle, sizeof bundle);
+        if (p->tty[0]) snprintf(where, sizeof where, "tty%s%s%s", p->tty, hosted ? " in " : "", hosted ? app_name(bundle, app, sizeof app) : "");
+        else if (hosted) snprintf(where, sizeof where, "%s", app_name(bundle, app, sizeof app));
+        else snprintf(where, sizeof where, "background, no window");
+        snprintf(line, sizeof line, " %s · started %s · %s", where, when, path[0] ? path : p->name);
+        sgr("36");
+        put_cols(line, cols, 0);
+        sgr("0");
+    }
+    put("\x1b[K\r\n");
+
+    // Footer line 2: prompt, status, or key help
     if (confirm) {
         int si2 = sel_index();
         proc_t *p = si2 >= 0 ? &procs[view[si2]] : NULL;
@@ -389,7 +483,7 @@ static void render(void) {
         put_cols(status, cols, 0);
     } else {
         sgr("2");
-        put_cols(" q quit  r refresh  ↑↓/jk move  s sort  / filter  x quit process  X force quit", cols, 0);
+        put_cols(" q quit  r refresh  ↑↓/jk move  ⏎ go to  s sort  / filter  x quit process  X force quit", cols, 0);
         sgr("0");
     }
     put("\x1b[K");
@@ -451,11 +545,48 @@ static void do_kill(int force) {
     });
 }
 
+// Bring the selected process's window forward: its iTerm or Terminal session when it
+// runs in one, else its app.
+static void jump(void) {
+    int i = sel_index();
+    if (i < 0) return;
+    proc_t *p = &procs[view[i]];
+    char bundle[PROC_PIDPATHINFO_MAXSIZE], app[64], script[1024];
+    int hosted = host_app(p->pid, bundle, sizeof bundle);
+    if (hosted) app_name(bundle, app, sizeof app);
+    if (p->tty[0] && hosted && strstr(app, "iTerm")) {
+        snprintf(script, sizeof script,
+            "tell application \"iTerm2\"\n"
+            "  repeat with w in windows\n    repeat with t in tabs of w\n      repeat with s in sessions of t\n"
+            "        if tty of s is \"/dev/tty%s\" then\n"
+            "          try\n            set miniaturized of w to false\n          end try\n"
+            "          select w\n          tell t to select\n          tell s to select\n          activate\n          return\n"
+            "        end if\n      end repeat\n    end repeat\n  end repeat\nend tell\nerror number 1", p->tty);
+    } else if (p->tty[0] && hosted && strstr(app, "Terminal")) {
+        snprintf(script, sizeof script,
+            "tell application \"Terminal\"\n"
+            "  repeat with w in windows\n    repeat with t in tabs of w\n"
+            "      if tty of t is \"/dev/tty%s\" then\n"
+            "        set miniaturized of w to false\n        set selected of t to true\n        set index of w to 1\n        activate\n        return\n"
+            "      end if\n    end repeat\n  end repeat\nend tell\nerror number 1", p->tty);
+    } else if (hosted) {
+        char *argv[] = { "/usr/bin/open", bundle, NULL };
+        snprintf(status, sizeof status, run_quiet(argv) == 0 ? " brought %s forward" : " couldn't open %s", app);
+        return;
+    } else {
+        snprintf(status, sizeof status, " %s runs in the background, with no window or terminal", p->name);
+        return;
+    }
+    char *argv[] = { "/usr/bin/osascript", "-e", script, NULL };
+    if (run_quiet(argv) == 0) snprintf(status, sizeof status, " jumped to %s (tty%s) in %s", p->name, p->tty, app);
+    else snprintf(status, sizeof status, " couldn't find tty%s in %s (allow mem to control %s in Privacy & Security > Automation)", p->tty, app, app);
+}
+
 static void on_input(void) {
     unsigned char buf[64];
     ssize_t n = read(STDIN_FILENO, buf, sizeof buf);
     if (n <= 0) { restore(); exit(0); }
-    int list_h = rows - 5 > 1 ? rows - 5 : 1;
+    int list_h = rows - 6 > 1 ? rows - 6 : 1;
     for (ssize_t i = 0; i < n; i++) {
         unsigned char c = buf[i];
         if (filtering) {
@@ -491,7 +622,13 @@ static void on_input(void) {
         case 'g': move_sel(-nview); break;
         case 'G': move_sel(nview); break;
         case ' ': move_sel(list_h); break;
-        case 's': sort_key = (sort_key + 1) % 3; build_view(); break;
+        case 's': {   // memory -> age -> name -> pid
+            static const int next[4] = { 3, 2, 0, 1 };
+            sort_key = next[sort_key];
+            build_view();
+            break;
+        }
+        case '\r': case '\n': jump(); break;
         case '/': filtering = 1; break;
         case 27: if (filter[0]) { filter[0] = 0; build_view(); } break;
         case 'x': if (sel_index() >= 0) confirm = 1; break;
@@ -513,10 +650,11 @@ static void snapshot(int limit) {
     sgr(pc == 32 ? "32" : pc == 33 ? "33" : "31"); put("%s", pw); sgr("0");
     put(" · %d%% free\n", sm.free_pct);
     put_totals_line();
-    put("\n%7s %10s  PROCESS\n", "PID", "MEMORY");
+    put("\n%7s %10s %5s %-6s  PROCESS\n", "PID", "MEMORY", "AGE", "TTY");
     for (int i = 0; i < nview && (limit <= 0 || i < limit); i++) {
         proc_t *p = &procs[view[i]];
-        put("%7d %10s  %s\n", p->pid, fmt_bytes(p->fp, m), p->name);
+        char a[8];
+        put("%7d %10s %5s %-6s  %s\n", p->pid, fmt_bytes(p->fp, m), fmt_age(p->start, a), p->tty[0] ? p->tty : "-", p->name);
         if (olen > sizeof out - 256) { fwrite(out, 1, olen, stdout); olen = 0; }
     }
     fwrite(out, 1, olen, stdout);

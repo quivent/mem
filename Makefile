@@ -10,10 +10,14 @@ ZIP      := dist/Mem-$(VERSION).zip
 
 all: $(APP) $(HELPER) $(CLI)
 
-$(APP): main.swift Info.plist
+Mem.icns: icon.swift
+	swift icon.swift Mem.iconset && iconutil -c icns Mem.iconset -o $@ && rm -rf Mem.iconset
+
+$(APP): main.swift Info.plist Mem.icns
 	rm -rf $@ && mkdir -p $@/Contents/MacOS
 	swiftc -O -whole-module-optimization main.swift -o $@/Contents/MacOS/Mem
 	sed "s/VERSION/$(VERSION)/" Info.plist > $@/Contents/Info.plist
+	mkdir -p $@/Contents/Resources && cp Mem.icns $@/Contents/Resources/
 	codesign --force --sign - $@
 
 $(HELPER): memread.c
@@ -52,4 +56,4 @@ dump: $(APP)
 	./$(APP)/Contents/MacOS/Mem --dump
 
 clean:
-	rm -rf $(APP) $(HELPER) $(CLI) dist
+	rm -rf $(APP) $(HELPER) $(CLI) Mem.icns dist

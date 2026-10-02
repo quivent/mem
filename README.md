@@ -8,6 +8,8 @@
  a memory monitor that doesn't eat memory
 ```
 
+<img src="docs/icon.png" width="128" align="right" alt="Mem icon">
+
 Mem is a memory monitor for macOS, in two forms:
 - **Mem.app**: a single native window, about 18 MB.
 - **`mem`**: a terminal UI, about 1.5 MB.
@@ -39,22 +41,35 @@ Both show what Activity Monitor's Memory tab shows, and neither does anything wh
  mem  used 9.89 GB of 16.00 GB   pressure Normal · 78% free   535 procs · 06:00:34
  ● app 6.66 GB  ● wired 2.39 GB  ● compressed 862 MB  ● cached 5.11 GB  free 1.20 GB
  ██████████████████████████████████████████████████████████████████████████░░░░░░░░
-     PID      MEMORY▼  PROCESS
-     801     1.07 GB   Xcode
-    2588      581 MB   Firefox GPU Helper
-    2586      450 MB   Firefox
-     393      384 MB   WindowServer
-    1000      342 MB   Terminal
- q quit  r refresh  ↑↓/jk move  s sort  / filter  x quit process  X force quit
+     PID      MEMORY▼   AGE  TTY     PROCESS
+     801     1.07 GB     3d  -       Xcode
+    2588      581 MB     3d  -       Firefox GPU Helper
+    2586      450 MB     3d  -       Firefox
+     393      384 MB     3d  -       WindowServer
+   69135      262 MB    9h  s006    ncdu
+ ttys006 in iTerm · started Thu Oct  1 21:48 · /opt/homebrew/bin/ncdu
+ q quit  r refresh  ↑↓/jk move  ⏎ go to  s sort  / filter  x quit process  X force quit
 ```
 
 `mem` is plain C with raw ANSI escapes (no ncurses), compiled to a 55 KB binary. It reads the same kernel counters and uses the same `memread` helper as the app.
+
+Each row tells you **what** a process is and **where** it lives:
+- **`AGE`**: how long ago the process started.
+- **`TTY`**: the terminal it runs in, if any.
+- **The cyan line** under the list: for the selected process, the app hosting it (the terminal for a shell job, the browser for a helper), its exact start time and its full path.
+
+Press `⏎` to jump there:
+- For a terminal process, Mem brings forward its exact iTerm or Terminal session, un-minimizing the window if needed.
+- For an app or app helper, it activates the app.
+
+That turns a forgotten `ncdu` left running in a minimized window since last night from a mystery into two keystrokes.
 
 | key            | does                                      |
 |----------------|-------------------------------------------|
 | `↑↓` `jk`      | move                                      |
 | `PgUp/PgDn` `g/G` `space` | page, top, bottom              |
-| `s`            | cycle sort: memory ▼, name ▲, PID ▲       |
+| `⏎`            | go to the process's terminal session or app |
+| `s`            | cycle sort: memory ▼, age (oldest first), name ▲, PID ▲ |
 | `/`            | filter by name or PID (`Esc` clears)      |
 | `r`            | re-read everything                        |
 | `x` / `X`      | quit / force quit the selected process (asks y/n) |
