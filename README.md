@@ -21,11 +21,11 @@ Mem is a single-window memory monitor for macOS. It shows what Activity Monitor'
 │ │ 🔍 Filter processes                                     ││
 │ └─────────────────────────────────────────────────────────┘│
 │  Process                              Memory ▼       PID   │
-│  basalt                               1.07 GB        801   │
-│  LibreWolf                             437 MB       2586   │
-│  gpu-helper                            423 MB       2588   │
+│  Xcode                                1.07 GB        801   │
+│  Firefox                               437 MB       2586   │
+│  Firefox GPU Helper                    423 MB       2588   │
 │  WindowServer                          381 MB        393   │
-│  iTerm                                 337 MB       1000   │
+│  Terminal                              337 MB       1000   │
 └────────────────────────────────────────────────────────────┘
 ```
 
