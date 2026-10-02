@@ -1,12 +1,14 @@
 VERSION  := 1.0
 APP      := Mem.app
 HELPER   := memread
+CLI      := mem
+BINDIR   ?= $(HOME)/.local/bin
 PREFIX   := /usr/local/libexec
 ZIP      := dist/Mem-$(VERSION).zip
 
-.PHONY: all install install-helper uninstall package dump clean
+.PHONY: all install install-cli install-helper uninstall package dump clean
 
-all: $(APP) $(HELPER)
+all: $(APP) $(HELPER) $(CLI)
 
 $(APP): main.swift Info.plist
 	rm -rf $@ && mkdir -p $@/Contents/MacOS
@@ -17,9 +19,16 @@ $(APP): main.swift Info.plist
 $(HELPER): memread.c
 	cc -O2 -Wall -o $@ $<
 
+$(CLI): mem.c
+	cc -O2 -Wall -Wextra -o $@ $<
+
 # Copy Mem.app to ~/Applications.
 install: $(APP)
 	mkdir -p ~/Applications && rm -rf ~/Applications/$(APP) && cp -R $(APP) ~/Applications/
+
+# Copy the mem CLI to $(BINDIR) (override: make install-cli BINDIR=/usr/local/bin).
+install-cli: $(CLI)
+	mkdir -p $(BINDIR) && install -m 755 $(CLI) $(BINDIR)/$(CLI)
 
 # One-time (rerun only if memread.c changes): setuid root so Mem can read
 # root-owned processes without running top. Asks for your password.
@@ -28,19 +37,19 @@ install-helper: $(HELPER)
 	sudo install -o root -g wheel -m 4755 $(HELPER) $(PREFIX)/$(HELPER)
 
 uninstall:
-	rm -rf ~/Applications/$(APP)
+	rm -rf ~/Applications/$(APP) $(BINDIR)/$(CLI)
 	sudo rm -f $(PREFIX)/$(HELPER)
 
 package: $(ZIP)
 
-$(ZIP): $(APP) $(HELPER)
+$(ZIP): $(APP) $(HELPER) $(CLI)
 	mkdir -p dist && rm -f $@
 	ditto -c -k --norsrc --noextattr --keepParent $(APP) $@
-	zip -qj $@ $(HELPER)
+	zip -qj $@ $(HELPER) $(CLI)
 
 # Print totals and the top processes, for checking numbers against top.
 dump: $(APP)
 	./$(APP)/Contents/MacOS/Mem --dump
 
 clean:
-	rm -rf $(APP) $(HELPER) dist
+	rm -rf $(APP) $(HELPER) $(CLI) dist

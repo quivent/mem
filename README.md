@@ -8,7 +8,11 @@
  a memory monitor that doesn't eat memory
 ```
 
-Mem is a single-window memory monitor for macOS. It shows what Activity Monitor's Memory tab shows, at a third of the size, and it does nothing while you aren't looking at it.
+Mem is a memory monitor for macOS, in two forms:
+- **Mem.app**: a single native window, about 18 MB.
+- **`mem`**: a terminal UI, about 1.5 MB.
+
+Both show what Activity Monitor's Memory tab shows, and neither does anything while you aren't looking at it.
 
 ```
 ┌─ Mem ──────────────── 521 processes · this app 18 MB · ⌘R ─┐
@@ -29,18 +33,53 @@ Mem is a single-window memory monitor for macOS. It shows what Activity Monitor'
 └────────────────────────────────────────────────────────────┘
 ```
 
+## `mem` in the terminal
+
+```
+ mem  used 9.89 GB of 16.00 GB   pressure Normal · 78% free   535 procs · 06:00:34
+ ● app 6.66 GB  ● wired 2.39 GB  ● compressed 862 MB  ● cached 5.11 GB  free 1.20 GB
+ ██████████████████████████████████████████████████████████████████████████░░░░░░░░
+     PID      MEMORY▼  PROCESS
+     801     1.07 GB   Xcode
+    2588      581 MB   Firefox GPU Helper
+    2586      450 MB   Firefox
+     393      384 MB   WindowServer
+    1000      342 MB   Terminal
+ q quit  r refresh  ↑↓/jk move  s sort  / filter  x quit process  X force quit
+```
+
+`mem` is plain C with raw ANSI escapes (no ncurses), compiled to a 55 KB binary. It reads the same kernel counters and uses the same `memread` helper as the app.
+
+| key            | does                                      |
+|----------------|-------------------------------------------|
+| `↑↓` `jk`      | move                                      |
+| `PgUp/PgDn` `g/G` `space` | page, top, bottom              |
+| `s`            | cycle sort: memory ▼, name ▲, PID ▲       |
+| `/`            | filter by name or PID (`Esc` clears)      |
+| `r`            | re-read everything                        |
+| `x` / `X`      | quit / force quit the selected process (asks y/n) |
+| `q`            | exit                                      |
+
+The screen redraws on keys and terminal resizes. The data is re-read on `r`, when the kernel reports a memory-pressure change, and after you quit a process. Each refresh shows the time it ran, so you can always see how fresh the numbers are.
+
+```sh
+mem -1          # print one snapshot (top 25) and exit
+mem -1 -n 50    # top 50
+mem -a | less   # every process; piped output is plain text without colors
+```
+
 ## Why
 
 Activity Monitor runs at about 52 MB, plus a root helper, `sysmond`. It re-reads every process every 1–5 seconds whether anything changed or not; on the machine this was built on, `sysmond` had used 58 minutes of CPU. Mem answers the same question (*where did my RAM go?*) for less:
 
-|                    | Mem                              | Activity Monitor              |
-|--------------------|----------------------------------|-------------------------------|
-| Footprint          | **~18 MB**                       | ~52 MB + `sysmond` ~2 MB      |
-| CPU while idle     | **0**: no timer                  | polls every 1–5 s             |
-| Cost of a refresh  | 0.4 ms direct + 1.5 ms `memread` | —                             |
-| Root processes     | yes (via `memread`)              | yes (via `sysmond`)           |
+|                    | `mem` (terminal)    | Mem.app             | Activity Monitor          |
+|--------------------|---------------------|---------------------|---------------------------|
+| Footprint          | **~1.5 MB**         | **~18 MB**          | ~52 MB + `sysmond` ~2 MB  |
+| CPU while idle     | **0**               | **0**               | polls every 1–5 s         |
+| Cost of a refresh  | ~2 ms               | 0.4 ms + 1.5 ms `memread` | —                   |
+| Root processes     | yes (`memread`)     | yes (`memread`)     | yes (`sysmond`)           |
 
-Measured on an Apple M4 running macOS 15.7, with about 520 processes. Any AppKit window costs about 11–12 MB, so Mem's own code accounts for about 6 MB of its total.
+Measured on an Apple M4 running macOS 15.7, with about 520 processes. Any AppKit window costs about 11–12 MB, so Mem.app's own code accounts for about 6 MB of its total. `mem` has no window, so it doesn't pay that floor.
 
 ## What it shows
 
@@ -83,8 +122,9 @@ You need the Xcode command-line tools (`swiftc`, `cc`).
 
 ```sh
 git clone https://github.com/quivent/mem.git && cd mem
-make                  # build Mem.app and memread
+make                  # build Mem.app, mem and memread
 make install          # copy Mem.app to ~/Applications
+make install-cli      # copy mem to ~/.local/bin (BINDIR=... to change)
 make install-helper   # one-time: install memread setuid root (sudo)
 ```
 
@@ -92,11 +132,12 @@ Rerun `make install-helper` only if `memread.c` changes.
 
 | target                | does                                           |
 |-----------------------|------------------------------------------------|
-| `make`                | build `Mem.app` and `memread`                  |
+| `make`                | build `Mem.app`, `mem` and `memread`           |
 | `make install`        | copy `Mem.app` to `~/Applications`             |
+| `make install-cli`    | copy `mem` to `~/.local/bin`                   |
 | `make install-helper` | install `memread` setuid root (one-time, sudo) |
-| `make uninstall`      | remove both                                    |
-| `make package`        | zip both into `dist/Mem-<version>.zip`         |
+| `make uninstall`      | remove all three                               |
+| `make package`        | zip all three into `dist/Mem-<version>.zip`    |
 | `make dump`           | print totals and the top processes to stdout   |
 | `make clean`          | remove build output                            |
 
@@ -108,6 +149,7 @@ Each of these choices was measured, not guessed:
 - **The process list is a plain `NSTableView`.** A custom-drawn list was tried and came out **+8 MB**: it needed one GPU-backed image the size of the whole list, while the table only creates views for the rows on screen.
 - **No Metal.** A Metal-rendered window would keep 2–3 window-sized frames of its own plus a glyph texture. AppKit already composites on the GPU, and the 11–12 MB floor is the window itself, not how it's drawn.
 - **No User column.** Mem only tracks whether you own each process, which Quit uses to explain permission errors.
+- **`mem` is C, not Swift.** It needs no runtime and no frameworks beyond libSystem, uses libdispatch sources for stdin, signals and memory-pressure events, and does one `write()` per frame.
 - **Heap:** about 4 MB of live allocations, mostly AppKit and Core Foundation bookkeeping. The process list itself is tens of KB.
 
 ## License
