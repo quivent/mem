@@ -11,14 +11,14 @@
 Mem is a single-window memory monitor for macOS. It shows what Activity Monitor's Memory tab shows, at a third of the size, and it does nothing while you aren't looking at it.
 
 ```
-┌─ Mem ─────────────── 521 processes · this app 18 MB · ⌘R ─┐
+┌─ Mem ──────────────── 521 processes · this app 18 MB · ⌘R ─┐
 │ Used          9.04 GB of 16.00 GB   Pressure  Normal · 80% │
 │ ● App               6.00 GB         ● Wired        2.16 GB │
 │ ● Compressed         899 MB         ● Cached files 4.78 GB │
 │ Free                2.62 GB         Swap   669 MB on disk  │
 │ [▓▓▓▓▓████████████████████░░░░░░░░░░░░░░░░░░             ] │
 │ ┌─────────────────────────────────────────────────────────┐│
-│ │ 🔍 Filter processes                                     ││
+│ │ Filter processes                                        ││
 │ └─────────────────────────────────────────────────────────┘│
 │  Process                              Memory ▼       PID   │
 │  Xcode                                1.07 GB        801   │
