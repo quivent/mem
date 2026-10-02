@@ -40,7 +40,7 @@ case "$1" in
     echo "installed /usr/local/libexec/memread (setuid root)" ;;
   --package)
     mkdir -p dist && rm -f dist/Mem-$version.zip
-    ditto -c -k --keepParent Mem.app dist/Mem-$version.zip
+    ditto -c -k --norsrc --noextattr --keepParent Mem.app dist/Mem-$version.zip
     zip -qj dist/Mem-$version.zip memread
     echo "packaged dist/Mem-$version.zip" ;;
 esac
